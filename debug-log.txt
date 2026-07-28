@@ -1,0 +1,239 @@
+ccs doesnt work with the multifile structure you like, those with a ton of separate header files for different functions. now the easiest working way is just writing entire code into single .c file and pasting into the working lab directories, so in future coding write stuff into single file.
+onboard encoders doesnt work, we're just gonna have to tune the PWM ratios. write a quick test code to calibrate the 2 motors.
+use driverlib
+CCS C89 Mode - No In-Loop Variable Declarations
+the base car is in TI -RSLK, should have documentation for all pinout
+
+
+# Debug Log - What We Learned
+
+## System Setup
+
+### Clock
+- **Working:** `CS_setDCOCenteredFrequency(CS_DCO_FREQUENCY_12)` - 12MHz DCO
+- **Don't use:** 48MHz crystal setup - adds complexity, not needed
+
+### UART (Serial Output)
+- **Working config at 12MHz SMCLK, 115200 baud:**
+```c
+eUSCI_UART_Config uart = {
+    EUSCI_A_UART_CLOCKSOURCE_SMCLK,
+    6, 8, 32,  // BRDIV, UCxBRF, UCxBRS
+    EUSCI_A_UART_NO_PARITY,
+    EUSCI_A_UART_LSB_FIRST,
+    EUSCI_A_UART_ONE_STOP_BIT,
+    EUSCI_A_UART_MODE,
+    EUSCI_A_UART_OVERSAMPLING_BAUDRATE_GENERATION
+};
+```
+- **Pins:** P1.2 (RX), P1.3 (TX)
+- **Don't use:** `eUSCI_UART_ConfigV1` - older DriverLib doesn't have it
+- **Don't use:** `EUSCI_A_UART_8_BIT_LEN` - undefined in older DriverLib
+
+### LED (Debug indicator)
+- **Working:** P1.0 red LED for visual confirmation code is running
+- **Always add LED blink** to verify code executes before debugging peripherals
+
+---
+
+## I2C / ToF Sensor (VL53L1X)
+
+### I2C Config
+- **Working config:**
+```c
+eUSCI_I2C_MasterConfig i2c = {
+    EUSCI_B_I2C_CLOCKSOURCE_SMCLK,
+    12000000,
+    EUSCI_B_I2C_SET_DATA_RATE_100KBPS,
+    0,
+    EUSCI_B_I2C_NO_AUTO_STOP
+};
+```
+- **Pins:** P1.6 (SDA), P1.7 (SCL)
+- **Don't use:** `Wire.setClock()` in Arduino - not supported on MSP432
+
+### VL53L1X Specifics
+- **Address:** 0x29
+- **XSHUT pin required:** Must toggle LOW then HIGH to reset sensor before I2C works
+- **XSHUT wired to:** P4.0
+- **Without XSHUT reset:** I2C scanner hangs or returns error 4
+
+### XSHUT Reset Sequence (Required)
+```c
+GPIO_setAsOutputPin(XSHUT_PORT, XSHUT_PIN);
+GPIO_setOutputLowOnPin(XSHUT_PORT, XSHUT_PIN);
+delay_ms(50);
+GPIO_setOutputHighOnPin(XSHUT_PORT, XSHUT_PIN);
+delay_ms(50);
+```
+
+### I2C Scan Results
+- **Error 0:** Device found
+- **Error 2:** NACK - device not responding
+- **Error 4:** Bus error - need XSHUT reset
+- **Timeout/hang:** Bus stuck - need XSHUT reset
+
+### VL53L1X Register Access
+- **Uses 16-bit register addresses** (not 8-bit like most I2C devices)
+- **Model ID register:** 0x010F, expected value 0xEA
+- **Boot status register:** 0x00E5, wait for value 0x03
+- **Data ready register:** 0x0031, bit 0 = ready
+- **Distance register:** 0x0096 (16-bit value, mm)
+- **Range status register:** 0x0089 (0 = good)
+- **Clear interrupt:** Write 0x01 to 0x0086
+- **Start ranging:** Write 0x40 to 0x0087
+
+### Current Issue
+- Sensor found on I2C
+- Model ID reads correctly (0xEA)
+- Boot OK
+- **Distance reads 0** - even with Adafruit full init sequence (91 bytes at 0x002D)
+- Sensor communicates (model ID, boot, init writes all succeed) but never returns valid distance
+- Range status and data ready register may need investigation
+
+### Register Access Naming (CRITICAL for CCS)
+- **Don't use:** MSP430-style `UCA0IFG`, `UCTXIFG`, `UCB0CTLW0`, `UCTXSTT`, `UCBBUSY`, etc.
+  - These macros are NOT defined in the MSP432 CCS headers
+  - Code compiles but TX hangs forever (flag polling never sees the flag)
+- **Must use:** MSP432 struct-based register access:
+  - `EUSCI_A0->IFG & EUSCI_A_IFG_TXIFG` (not `UCA0IFG & UCTXIFG`)
+  - `EUSCI_B0->CTLW0 |= EUSCI_B_CTLW0_TR | EUSCI_B_CTLW0_TXSTT` (not `UCB0CTLW0 |= UCTR | UCTXSTT`)
+  - `EUSCI_B0->STATW & EUSCI_B_STATW_BBUSY` (not `UCB0STATW & UCBBUSY`)
+  - `EUSCI_B0->IFG & EUSCI_B_IFG_NACKIFG` (not `UCB0IFG & UCNACKIFG`)
+  - `EUSCI_B0->IFG & EUSCI_B_IFG_TXIFG0` (not `UCB0IFG & UCTXIFG0`)
+  - `EUSCI_B0->IFG & EUSCI_B_IFG_RXIFG0` (not `UCB0IFG & UCRXIFG0`)
+- UART init via DriverLib with `eUSCI_UART_Config` + `UART_initModule` + `UART_enableModule` works reliably
+- I2C init via DriverLib with `eUSCI_I2C_MasterConfig` + `I2C_initMaster` + `I2C_enableModule` works reliably
+- I2C transactions use struct-based direct register access (pattern from ToF-test2.c)
+
+### VL53L1X Open Issues
+- Adafruit init sequence is written and acknowledged but distance still reads 0
+- Possible causes to investigate:
+  1. Timing budget / distance mode registers need different values
+  2. Additional init steps needed (soft reset register 0x0016, etc.)
+  3. Data ready register (0x0031) may need different polling approach
+  4. Sensor may need a ranging mode change before it produces data
+
+---
+
+## Motors (RSLK)
+
+### Working Pins
+| Function | Port.Pin | Energia # |
+|----------|----------|-----------|
+| Left DIR | P3.7 | 32 |
+| Left SLP | P3.6 | 11 |
+| Right DIR | P3.5 | 47 |
+| Right SLP | P3.0 | 12 |
+| Left PWM | P2.4 | 19 |
+| Right PWM | P2.5 | 38 |
+
+### Motor Control
+- **SLP pins:** HIGH = awake, LOW = sleep
+- **DIR pins:** LOW = forward, HIGH = backward
+- **Must wake motors** (SLP HIGH) before PWM works
+
+### Calibration Result
+- Left wheel slower than right
+- **Right motor ratio:** 0.96 (multiply right PWM by 0.96)
+- Tested at PWM 128, measured 95cm left vs 101.5cm right
+
+---
+
+## Arduino IDE vs CCS
+
+### Arduino/Energia Issues
+- `Wire` library unreliable on MSP432
+- `Wire.setClock()` doesn't exist
+- I2C scanner returned error 4 or nothing
+- **Recommendation:** Use Arduino only for simple GPIO/PWM (motors worked)
+
+### CCS/DriverLib
+- More verbose but reliable
+- I2C works with direct register access
+- **Use CCS for I2C peripherals** (ToF sensor)
+
+---
+
+## Code Structure
+
+### CCS Constraints
+- **Single .c file only** - multi-file with headers doesn't work easily
+- Paste everything into one file in working lab directory
+
+### Delay Function (No SysTick dependency)
+```c
+void delay_ms(uint32_t ms) {
+    uint32_t i, j;
+    for (i = 0; i < ms; i++)
+        for (j = 0; j < 3000; j++)
+            __no_operation();
+}
+```
+- **Don't use SysTick-based delay** (`while (ms_ticks < end)` pattern)
+  - Depends on vector table having SysTick_Handler and global interrupts enabled
+  - CCS startup may not have SysTick handler set up properly
+  - Busy-loop delay always works
+
+### GPIO Functions
+- DriverLib GPIO functions work reliably:
+  - `GPIO_setAsOutputPin(GPIO_PORT_P1, GPIO_PIN0)`
+  - `GPIO_setOutputHighOnPin(GPIO_PORT_P1, GPIO_PIN0)`
+  - `GPIO_toggleOutputOnPin(GPIO_PORT_P1, GPIO_PIN0)`
+  - `GPIO_setAsInputPinWithPullUpResistor(GPIO_PORT_P1, GPIO_PIN1)`
+- Direct register access (`P1DIR |= BIT0`, `P1OUT |= BIT0`) also works
+
+---
+
+## Python Dashboard Serial Port Selection
+- `find_port()` must look for `'USER'`, `'APPLICATION'`, or `'MSP'` in port description
+- **Don't use:** generic keywords like `'XDS'`, `'USB'`, `'SERIAL'`, `'UART'` — they match both COM5 (Aux) and COM6 (App UART)
+- XDS110 provides two COM ports: COM5 = Auxiliary Data Port, COM6 = Application/User UART
+- **User UART (COM6)** is the one connected to the MSP432's serial output
+
+## Common Build Errors
+- `eUSCI_UART_ConfigV1`: undefined — use `eUSCI_UART_Config` instead
+- `EUSCI_A_UART_8_BIT_LEN`: undefined — omit this field
+- MSP430-style `UCxx` register macros: undefined — use `EUSCI_x0->REG` struct style
+
+---
+
+## Pins Summary (What's Used)
+
+| Pin | Function | Peripheral |
+|-----|----------|------------|
+| P1.0 | Red LED | Debug |
+| P1.2 | UART RX | Serial |
+| P1.3 | UART TX | Serial |
+| P1.6 | I2C SDA | ToF |
+| P1.7 | I2C SCL | ToF |
+| P2.4 | Left PWM | Motor |
+| P2.5 | Right PWM | Motor |
+| P3.0 | Right SLP | Motor |
+| P3.5 | Right DIR | Motor |
+| P3.6 | Left SLP | Motor |
+| P3.7 | Left DIR | Motor |
+| P4.0 | XSHUT | ToF reset |
+
+### Available for Servos
+- P2.6 (pin 37) - Pan servo
+- P2.7 (pin 36) - Tilt servo
+
+---
+### HC-05 Bluetooth (AT Mode)
+- **Baud:** 38400 (AT mode default)
+- **BRW=19, UCxBRF=8, UCxBRS=0x55** at 12MHz SMCLK
+- **Pins:** P3.2 (MSP RX ← HC-05 TX), P3.3 (MSP TX → HC-05 RX)
+- **Key learning:** Must use tight polling loop, no delays between RX checks
+
+
+- **AT Mode:** 38400 baud, slow blink, EN pin HIGH
+- **Data Mode:** 115200 baud, fast blink, EN pin floating/LOW
+- **Name:** ROVER3D
+- **PIN:** 1234
+- **Query commands (`AT+NAME`):** Return ERROR on this module - normal
+- **Set commands (`AT+NAME=X`):** Work correctly
+
+
+
+

@@ -7,7 +7,7 @@
 #include <stdbool.h>
 
 /*===========================================================================*/
-/* PINS                                                                       */
+/* PINS                                                                      */
 /*===========================================================================*/
 
 #define XSHUT_PORT  GPIO_PORT_P4
@@ -16,7 +16,7 @@
 #define VL53L1X_ADDR 0x29
 
 /*===========================================================================*/
-/* Adafruit init sequence                                                     */
+/* Adafruit init sequence                                                    */
 /*===========================================================================*/
 
 static const uint8_t VL51L1X_DEFAULT_CONFIGURATION[] = {
@@ -35,7 +35,7 @@ static const uint8_t VL51L1X_DEFAULT_CONFIGURATION[] = {
 };
 
 /*===========================================================================*/
-/* UART CONFIG (Working from debug log)                                       */
+/* UART CONFIG (Working from debug log)                                      */
 /*===========================================================================*/
 
 const eUSCI_UART_Config uartConfig = {
@@ -49,7 +49,7 @@ const eUSCI_UART_Config uartConfig = {
 };
 
 /*===========================================================================*/
-/* I2C CONFIG (Working from debug log)                                        */
+/* I2C CONFIG (Working from debug log)                                       */
 /*===========================================================================*/
 
 const eUSCI_I2C_MasterConfig i2cConfig = {
@@ -72,7 +72,7 @@ void delay_ms(uint32_t ms) {
 }
 
 /*===========================================================================*/
-/* UART                                                                       */
+/* UART                                                                      */
 /*===========================================================================*/
 
 void UART_Init(void) {
@@ -120,7 +120,7 @@ void UART_PrintHex(uint8_t val) {
 }
 
 /*===========================================================================*/
-/* LED                                                                        */
+/* LED                                                                       */
 /*===========================================================================*/
 
 void LED_Init(void) {
@@ -147,7 +147,7 @@ void LED_Blink(int times) {
 }
 
 /*===========================================================================*/
-/* I2C (Direct register, more reliable)                                       */
+/* I2C (Direct register, more reliable)                                      */
 /*===========================================================================*/
 
 void I2C_Init(void) {
@@ -331,7 +331,7 @@ void VL53L1X_Reset(void) {
 }
 
 /*===========================================================================*/
-/* VL53L1X                                                                    */
+/* VL53L1X                                                                   */
 /*===========================================================================*/
 
 bool VL53L1X_Init(void) {
@@ -342,17 +342,19 @@ bool VL53L1X_Init(void) {
     /* Check model ID (should be 0xEA) */
     modelId = I2C_ReadReg8(0x010F);
 
+    /*
     UART_Print("Model ID: 0x");
     UART_PrintHex(modelId);
     UART_Print("\r\n");
+    */
 
     if (modelId != 0xEA) {
-        UART_Print("Wrong ID!\r\n");
+        /* UART_Print("Wrong ID!\r\n"); */
         return false;
     }
 
     /* Wait for boot (0x00E5 should become 0x03) */
-    UART_Print("Waiting boot...\r\n");
+    /* UART_Print("Waiting boot...\r\n"); */
     for (i = 0; i < 100; i++) {
         bootState = I2C_ReadReg8(0x00E5);
         if (bootState == 0x03) break;
@@ -360,26 +362,30 @@ bool VL53L1X_Init(void) {
     }
 
     if (bootState != 0x03) {
+        /*
         UART_Print("Boot fail: 0x");
         UART_PrintHex(bootState);
         UART_Print("\r\n");
+        */
         return false;
     }
 
-    UART_Print("Boot OK\r\n");
+    /* UART_Print("Boot OK\r\n"); */
 
     /* Write Adafruit init sequence starting at 0x002D */
-    UART_Print("Init seq...\r\n");
+    /* UART_Print("Init seq...\r\n"); */
     for (i = 0; i < sizeof(VL51L1X_DEFAULT_CONFIGURATION); i++) {
         if (!I2C_WriteReg8(0x002D + i, VL51L1X_DEFAULT_CONFIGURATION[i])) {
+            /*
             UART_Print("Init write fail at ");
             UART_PrintNum(i);
             UART_Print("\r\n");
+            */
             return false;
         }
     }
 
-    UART_Print("Init done\r\n");
+    /* UART_Print("Init done\r\n"); */
 
     /* Start continuous ranging */
     I2C_WriteReg8(0x0086, 0x01);  /* Clear interrupt */
@@ -411,62 +417,67 @@ uint16_t VL53L1X_GetDistance(void) {
 }
 
 /*===========================================================================*/
-/* MAIN                                                                       */
+/* MAIN                                                                      */
 /*===========================================================================*/
 
 int main(void) {
-    uint16_t distance;
+    uint16_t distance = 0;
+    uint16_t status = 0;
+    int retry = 0;
 
     /* Stop watchdog */
     WDT_A_holdTimer();
 
-    /* 12MHz DCO (working config from debug log) */
+    /* 12MHz DCO */
     CS_setDCOCenteredFrequency(CS_DCO_FREQUENCY_12);
 
-    /* Init LED first for debug */
+    /* Init LED */
     LED_Init();
-    LED_Blink(3);  /* Visual confirmation code started */
+    LED_Blink(3);
 
-    /* Init UART */
+    /* Init UART & I2C */
     UART_Init();
     delay_ms(100);
-
-    UART_Print("\r\n\r\n=== VL53L1X Test ===\r\n");
-
-    /* Init I2C */
     I2C_Init();
     delay_ms(100);
 
-    /* XSHUT reset (required!) */
-    UART_Print("XSHUT reset...\r\n");
+    /* Reset & Init sensor */
     VL53L1X_Reset();
     delay_ms(100);
 
-    /* Init sensor */
     if (VL53L1X_Init()) {
-        UART_Print("Sensor ready!\r\n");
         LED_On();
     } else {
-        UART_Print("Sensor FAILED!\r\n");
         LED_Blink(10);
         while (1);
     }
 
-    UART_Print("Starting readings...\r\n\r\n");
     delay_ms(500);
 
     /* Main loop */
     while (1) {
-        distance = VL53L1X_GetDistance();
+        distance = 0;
 
-        if (distance > 0) {
-            UART_Print("Dist: ");
-            UART_PrintNum(distance);
-            UART_Print(" mm\r\n");
-        } else {
-            UART_Print(".\r\n");  /* Waiting for data */
+        /* Poll up to 5 times (50ms total) waiting for data ready bit */
+        for (retry = 0; retry < 5; retry++) {
+            distance = VL53L1X_GetDistance();
+            if (distance > 0) break;
+            delay_ms(10);
         }
 
-        delay_ms(100);
+        if (distance > 0) {
+            status = 1;  /* Ready / Valid measurement */
+        } else {
+            status = 0;  /* Not ready */
+        }
+
+        /* CSV Output format: D,dist,status\r\n */
+        UART_Print("D,");
+        UART_PrintNum(distance);
+        UART_Print(",");
+        UART_PrintNum(status);
+        UART_Print("\r\n");
+
+        delay_ms(50);
     }
 }

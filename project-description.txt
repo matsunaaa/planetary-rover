@@ -1,0 +1,64 @@
+Here is a complete, structured project description tailored for your final demo, design review, and report.
+Project Title
+Dual-Spectrum Planetary Micro-Rover: Autonomous 3D Surface Mapping and Acoustic Subsurface Regolith Profiling
+1. Executive Summary
+Planetary exploration rovers face two critical navigational and scientific challenges: navigating unpredictable surface topography and detecting hazards buried beneath loose soil/regolith (e.g., hollow crusts, soft dust traps, or solid bedrock).
+This project implements a budget-conscious (~$50 added hardware), autonomous micro-rover prototype using an MSP432 MCU (ARM Cortex-M4F) and a 2-wheel differential drive base. The system integrates a panning Time-of-Flight (ToF) LiDAR for real-time 3D topographic surface mapping alongside an Active Acoustic Impulse Spectroscopy payload—leveraging a custom 2-channel audio signal processing PCB—to perform real-time subsurface material classification.
+
+Hardware Components & Budget
+Main Microcontroller: MSP432P401R (48 MHz ARM Cortex-M4F with hardware FPU, 14-bit ADC).
+Base Platform: 2-wheel differential-drive robot chassis with wheel quadrature encoders.
+Acoustic Front-End: Reused UC Davis 2-Channel Sound Detector PCB (LM6134 Op-Amp, onboard gain stage, and $RC$ low-pass filter).
+Impulse Actuator: 5V push-pull solenoid driven via N-channel MOSFET circuit.
+Acoustic Sensor: Piezoelectric contact transducer / electret microphone mounted to chassis.
+3D LiDAR Mapping: VL53L1X Time-of-Flight (ToF) distance sensor ($4\,\text{m}$ range) mounted to an SG90 micro-servo pan platform.
+Estimated Project Cost: ~$45 – $60 (Well under the $100 limit).
+3. Subsystem Functionality
+A. Subsurface Acoustic Spectroscopy (Geological Profiling)
+Impulse Trigger: The rover halts motor PWM output (eliminating mechanical vibration and electrical noise) and fires a $20\,\text{ms}$ pulse to the solenoid, delivering a physical "tap" to the ground.
+Signal Conditioning: The reverberation signal passes into the UC Davis Audio PCB. The inverting op-amp stage applies gain (adjusted via $VR1$), while the $RC$ low-pass filter ($VR2 + R9 + C3$) removes unwanted high-frequency motor/ambient noise to act as an anti-aliasing filter before sampling.
+DSP Pipeline (MSP432): The MSP432 samples the signal via ADC14 with Timer_A DMA ping-pong buffers. It runs an $N=512$ point Real FFT using the ARM CMSIS-DSP library (arm_cfft_f32).
+Classification Logic:
+High Frequency (>2 kHz) & Slow Decay: High-density surface (bedrock / concrete).
+Low Frequency (<500 Hz) & Rapid Damping: Soft surface (loose soil / sand / dust trap hazard).
+B. Topographic 3D Point Cloud Mapping
+2D Sweep Angle: The SG90 micro-servo pans the ToF sensor continuously across a $90^\circ$ arc ($-45^\circ$ to $+45^\circ$) ahead of the rover.
+Odometry Fusion: Wheel encoders track distance traveled ($x, y$) and heading angle ($\theta$). Combining encoder odometry, servo position angle ($\phi$), and distance ($r$), the MSP432 computes 3D spatial points:
+$$x_{point} = x_{rover} + r \cdot \cos(\theta + \phi)$$
+$$y_{point} = y_{rover} + r \cdot \sin(\theta + \phi)$$
+$$z_{point} = z_{rover} + r \cdot \sin(\text{elevation angle})$$
+Data Telemetry: Point coordinates $(x, y, z)$ along with soil hardness tags are streamed over UART/Bluetooth to a visualization host (Processing / Python / ROS).
+4. Software State Machine Flow
+  +-----------------------------------------------------------+
+   |                     1. DRIVE & MAPPING                    |
+   | - Move forward via differential wheel drive               |
+   | - Pan ToF LiDAR with servo (-45° to +45°)                 |
+   | - Read wheel encoders & compute 3D point cloud            |
+   +------------------------------+----------------------------+
+                                  |
+                                  | Distance interval reached 
+                                  | (or every 20cm)
+                                  v
+   +-----------------------------------------------------------+
+   |                     2. ACOUSTIC SAMPLE                    |
+   | - Stop drive motors completely                            |
+   | - Trigger solenoid ground pulse (TAP)                     |
+   | - Sample ADC DMA buffer from Audio PCB (Audio1 output)    |
+   +------------------------------+----------------------------+
+                                  |
+                                  | Buffer filled
+                                  v
+   +-----------------------------------------------------------+
+   |                  3. DSP & DATA FUSION                     |
+   | - Compute FFT (arm_cfft_f32) on MSP432 FPU                |
+   | - Classify surface density (Loose / Firm / Bedrock)       |
+   | - Append soil tag to 3D point cloud data packet           |
+   | - Transmit telemetry via UART -> Resume Movement          |
+   +-----------------------------------------------------------+
+
+
+5. Expected Results & Key Metrics
+3D Mapping Resolution: Angular sweep resolution of $\sim 2^\circ$ yielding a dense point cloud grid within a $2\,\text{m}$ range envelope.
+Spectral Distinction: Clear frequency distribution separation (>15 dB shift in peak frequency magnitude) between soft sand/rug vs. hard tile/concrete floors.
+Sampling Rate: Subsecond acoustic tap-to-FFT execution (<200 ms latency thanks to CMSIS-DSP hardware acceleration).
+
