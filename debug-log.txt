@@ -137,6 +137,8 @@ delay_ms(50);
 - Left wheel slower than right
 - **Right motor ratio:** 0.96 (multiply right PWM by 0.96)
 - Tested at PWM 128, measured 95cm left vs 101.5cm right
+- Speed : 0.038 cm/ms
+
 
 ---
 
@@ -220,19 +222,19 @@ void delay_ms(uint32_t ms) {
 - P2.7 (pin 36) - Tilt servo
 
 ---
-### HC-05 Bluetooth (AT Mode)
-- **Baud:** 38400 (AT mode default)
+### HC-05 Bluetooth
+
+- **AT Mode:** 38400 baud, slow blink, EN pin HIGH
 - **BRW=19, UCxBRF=8, UCxBRS=0x55** at 12MHz SMCLK
 - **Pins:** P3.2 (MSP RX ← HC-05 TX), P3.3 (MSP TX → HC-05 RX)
 - **Key learning:** Must use tight polling loop, no delays between RX checks
-
-
-- **AT Mode:** 38400 baud, slow blink, EN pin HIGH
 - **Data Mode:** 115200 baud, fast blink, EN pin floating/LOW
 - **Name:** ROVER3D
 - **PIN:** 1234
 - **Query commands (`AT+NAME`):** Return ERROR on this module - normal
 - **Set commands (`AT+NAME=X`):** Work correctly
+
+Bluetooth on com13, serial on com6
 
 
 
