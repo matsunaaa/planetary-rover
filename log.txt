@@ -1,0 +1,219 @@
+# Project Log - Planetary Micro-Rover
+
+## Project Description (Current Hybrid Design)
+
+Dual-Spectrum Planetary Micro-Rover using an MSP432P401R (ARM Cortex-M4F) for actuator control and an ESP32 DevKit for sensor processing + WiFi dashboard. The MSP432 handles 2-wheel differential drive (motors + encoders) and pan/tilt servo sweep for 3D scanning. The ESP32 reads the VL53L1X ToF sensor via I2C (Adafruit library), receives servo position from MSP432 via UART, and broadcasts combined 3D scan data over WiFi WebSocket to a browser dashboard.
+
+### Split Architecture
+- **MSP432 (CCS, single .c file):** Motor PWM + encoder odometry + servo PWM (pan/tilt). Sends position data via UART to ESP32. No I2C/ToF on MSP432.
+- **ESP32 (Arduino IDE):** VL53L1X ToF via Adafruit library, WiFi AP "ROVER3D", HTTP dashboard + WebSocket server. Receives MSP432 UART data, reads ToF, serves combined visualization.
+
+---
+
+## Hardware Configuration
+
+### MSP432 Pin Allocation (Current)
+
+| Pin | Function | Peripheral | Notes |
+|-----|----------|------------|-------|
+| P1.0 | Red LED | GPIO out | Debug heartbeat |
+| P1.2 | USB UART RX | EUSCI_A0 | Serial console (COM6) |
+| P1.3 | USB UART TX | EUSCI_A0 | Serial console (COM6) |
+| P2.4 | Left motor PWM | TA0.1 | RSLK chassis |
+| P2.5 | Right motor PWM | TA0.2 | RSLK chassis |
+| P2.6 | Pan servo | TA0.3 | SG90, 0-90 deg |
+| P2.7 | Tilt servo | TA0.4 | SG90, 37-180 deg |
+| P3.0 | Right motor SLP | GPIO out | RSLK |
+| P3.2 | ESP32 UART RX | EUSCI_A2 RX | From ESP32 TX (unused) |
+| P3.3 | ESP32 UART TX | EUSCI_A2 TX | To ESP32 GPIO16 |
+| P3.5 | Right motor DIR | GPIO out | RSLK |
+| P3.6 | Left motor SLP | GPIO out | RSLK |
+| P3.7 | Left motor DIR | GPIO out | RSLK |
+
+### ESP32 Pin Allocation
+
+| Pin | Function | Notes |
+|-----|----------|-------|
+| GPIO16 | UART RX | From MSP432 P3.3 TX |
+| GPIO17 | XSHUT out | To VL53L1X XSHUT |
+| GPIO21 | I2C SDA | To VL53L1X SDA |
+| GPIO22 | I2C SCL | To VL53L1X SCL |
+| GPIO2 | (on-board LED) | Status indicator |
+
+### Servo PWM Configuration
+
+- **Timer:** TimerA0, UP mode
+- **Clock:** SMCLK=12MHz, prescaler /16 → 750kHz
+- **Period:** 15000 ticks → 20ms (50Hz)
+- **Pulse mapping:** 0deg = 750 ticks (1ms), 180deg = 1500 ticks (2ms)
+- **Output mode:** TIMER_A_OUTPUTMODE_RESET_SET
+
+#### Servo Ranges
+- **Pan (P2.6/TA0.3):** 0 to 90 degrees
+- **Tilt (P2.7/TA0.4):** 37 to 180 degrees
+- **Sweep step:** 2 degrees
+- **Movement speed:** 30ms per degree step (smooth), 50ms settle at each position
+
+### System Clock
+- MSP432: 12MHz DCO (`CS_setDCOCenteredFrequency(CS_DCO_FREQUENCY_12)`)
+- ESP32: Default 240MHz (Arduino handles this)
+
+---
+
+## Communication Protocol
+
+### MSP432 → ESP32 (UART, 115200 baud)
+
+| Format | Description |
+|--------|-------------|
+| `P,pan,tilt\r\n` | Servo position update (pan=0-90, tilt=37-180) |
+| `START\r\n` | Scan begin |
+| `DONE\r\n` | Scan complete |
+
+### ESP32 → WebSocket → Browser
+
+| Format | Description |
+|--------|-------------|
+| `D,dist,status\r\n` | ToF distance in mm, 1=valid 0=wait |
+| `S,pan,tilt,dist\r\n` | 3D scan point with position + distance |
+
+---
+
+## WiFi Dashboard
+
+- **SSID:** ROVER3D
+- **Password:** 12345678
+- **Dashboard URL:** http://192.168.4.1
+- **WebSocket port:** 81
+- **ESP32 Library:** WebSockets by Markus Sattler
+
+### Dashboard Features
+- Real-time distance display with color-coded status bar
+- Distance history chart (200 samples)
+- 3D scan scatter plot (pan vs tilt, color-coded by distance from blue=near to red=far)
+- Raw data log panel
+
+---
+
+## Key Code Lessons (MSP432/CCS)
+
+### CCS Constraints
+- Single .c file only (multifile headersstruggle with CCS)
+- C89 mode: declare all variables at top of block, no in-loop declarations
+- DriverLib functions are reliable; use them
+
+### Clock
+- **Working:** `CS_setDCOCenteredFrequency(CS_DCO_FREQUENCY_12)`
+- Don't use 48MHz crystal setup
+
+### UART Config (115200 @ 12MHz SMCLK)
+```c
+const eUSCI_UART_Config uart = {
+    EUSCI_A_UART_CLOCKSOURCE_SMCLK,
+    6, 8, 32,                         // BRDIV, UCxBRF, UCxBRS
+    EUSCI_A_UART_NO_PARITY,
+    EUSCI_A_UART_LSB_FIRST,
+    EUSCI_A_UART_ONE_STOP_BIT,
+    EUSCI_A_UART_MODE,
+    EUSCI_A_UART_OVERSAMPLING_BAUDRATE_GENERATION
+};
+```
+- Don't use `eUSCI_UART_ConfigV1` (undefined in older DriverLib)
+- Don't use `EUSCI_A_UART_8_BIT_LEN` (undefined)
+
+### Register Access (CRITICAL - struct style, not MSP430 macros)
+- **Don't use:** `UCA0IFG`, `UCTXIFG`, `UCB0CTLW0`, `UCTXSTT`, `UCBBUSY` — NOT defined in MSP432 CCS headers
+- **Must use struct-based:**
+  - `EUSCI_A0->IFG & EUSCI_A_IFG_TXIFG`
+  - `EUSCI_B0->CTLW0 |= EUSCI_B_CTLW0_TR | EUSCI_B_CTLW0_TXSTT`
+  - `EUSCI_B0->STATW & EUSCI_B_STATW_BBUSY`
+  - `EUSCI_B0->IFG & EUSCI_B_IFG_NACKIFG`
+
+### Delay (no SysTick dependency)
+```c
+void delay_ms(uint32_t ms) {
+    uint32_t i, j;
+    for (i = 0; i < ms; i++)
+        for (j = 0; j < 3000; j++)
+            __no_operation();
+}
+```
+- Don't use SysTick-based delay (vector table / interrupt setup not guaranteed in CCS)
+
+### LED
+- P1.0 always add LED blink to verify code executes before debugging peripherals
+
+---
+
+## Key ESP32 Notes
+
+- **VL53L1X Library:** Use Adafruit_VL53L1X (Arduino Library Manager). Works reliably. Avoid raw I2C register access on ESP32.
+- **XSHUT:** Must toggle LOW for 50ms then HIGH for 50ms before `vl53.begin()`
+- **I2C pins:** GPIO21 (SDA), GPIO22 (SCL) at 100kHz
+- **UART from MSP432:** GPIO16 at 115200 baud
+
+---
+
+## Motor Notes (RSLK Chassis - for future use)
+
+### Pin Mapping
+| Function | Pin |
+|----------|-----|
+| Left DIR | P3.7 |
+| Left SLP | P3.6 |
+| Right DIR | P3.5 |
+| Right SLP | P3.0 |
+| Left PWM | P2.4 (TA0.1) |
+| Right PWM | P2.5 (TA0.2) |
+
+### Control
+- SLP HIGH = awake, LOW = sleep
+- DIR LOW = forward, HIGH = backward
+- Must wake motors (SLP HIGH) before PWM works
+
+### Calibration
+- Right motor 0.96 ratio (multiply right PWM by 0.96)
+- Speed: ~0.038 cm/ms at PWM 128
+
+---
+
+## Project File Structure
+
+```
+planetary_rover/
+  debug-log.txt           # Original debug diary (old architecture)
+  log.txt                 # This file (current hybrid architecture)
+  project-description.txt # Original project proposal
+  tests/
+    servo-only/
+      servo-test.c        # Basic servo sweep test (no UART output)
+    servo-sweep/
+      servo-sweep.c       # MSP432 servo sweep with UART position output
+    servo-tof-dashboard/
+      servo-tof-dashboard.c  # Old all-in-one (servo + ToF on MSP432, deprecated)
+    esp32-tof-test/
+      esp32-tof-test.ino  # ESP32 standalone ToF test + WiFi dashboard
+    tof/
+      ToF-test.c          # Original MSP432 ToF test (deprecated - I2C fried)
+      ToF-test-debug.c    # Debug version with diagnostics
+    wifi/esp-wifi/
+      esp-wifi.ino        # ESP32 WiFi bridge (UART->WebSocket, no ToF)
+    motor/
+      encoder-test        # Wheel encoder + odometry test
+      distance-calibration.c # Motor calibration
+```
+
+---
+
+## Status Summary (July 2026)
+
+- **Servo PWM:** WORKING - both pan (P2.6) and tilt (P2.7) at 50Hz
+- **ESP32 WiFi Dashboard:** WORKING - AP mode, WebSocket, HTTP
+- **ESP32 ToF (Adafruit lib):** WORKING - VL53L1X reads correctly
+- **MSP432 I2C:** FAILED - likely fried, moved ToF to ESP32
+- **HC-05 Bluetooth:** DEAD - internal failure, abandoned
+- **Motors:** Initial test - NAVIGATION.C now has BASE_PWM=9000 (30% duty at 30000 period), MOTOR_PERIOD=30000
+- **Servos replaced back:** 360° MG90S reverted to standard SG90 180° servos (360° continuous rotation can't position-hold)
+- **Mount:** Tilt servo taped directly on pan horn (no mechanism) - kept from 360 mod
+- **Pan upper limit extended +20°:** PAN_MAX = 110 (was 90), PAN_CENTER = 55 (was 45)
+- **All servo movements now gradual:** Added `cur_pan`/`cur_tilt` position tracking, `smooth_pan_to()`/`smooth_tilt_to()` ramp 1°/30ms. Timer init sets both servos to 90° (center) to minimize initial snap. No direct `set_pan`/`set_tilt` outside scan loops (where steps are already 2-5° with settle delay).

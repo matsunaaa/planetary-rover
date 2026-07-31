@@ -119,7 +119,7 @@ int main(void) {
     /* Configure for project */
     usb_print("--- Configuring... ---\r\n\r\n");
 
-    at_cmd("AT+NAME=ROVER3D");           /* Set name */
+    at_cmd("AT+NAME=ROVER3D1");           /* Set name */
     at_cmd("AT+UART=115200,0,0");        /* 115200 baud, 1 stop, no parity */
     at_cmd("AT+PSWD=1234");              /* PIN 1234 */
 
