@@ -6,8 +6,9 @@
  * Architecture:
  *   In SIMULATED mode (SIMULATED=1): synthetic distance that decreases
  *     with "drive time" until threshold crossing.
- *   In real mode (SIMULATED=0): communicates with ESP32 companion sketch.
- *     MSP432 sends P,pan,tilt, receives D,dist back.
+ *   In real mode (SIMULATED=0): ESP32 streams ToF and drives a GPIO danger
+ *     line (P4.0) HIGH when an obstacle is within threshold. MSP432 polls
+ *     that pin directly - no UART distance link required.
  *
  * Pins:
  *   P1.0  - LED (blink rate indicates state)
@@ -28,7 +29,7 @@
  * UART: 115200 baud
  */
 
-#define SIMULATED 1
+#define SIMULATED 0
 
 #include "driverlib.h"
 #include <stdint.h>
@@ -42,7 +43,7 @@
 #define PAN_CENTER          55
 #define TILT_HORIZONTAL     90
 
-#define CRITICAL_THRESHOLD_MM  150
+#define CRITICAL_THRESHOLD_MM  500
 #define SWEEP_STEP          2
 #define SWEEP_DELAY_MS      30
 #define POLL_INTERVAL_MS    20
@@ -128,26 +129,6 @@ void esp_putc(char c) {
 
 void esp_print(const char *s) {
     while (*s) esp_putc(*s++);
-}
-
-#if !SIMULATED
-void esp_int(int32_t val) {
-    char buf[12];
-    int i = 0;
-    if (val < 0) { esp_putc('-'); val = -val; }
-    if (val == 0) { esp_putc('0'); return; }
-    while (val > 0) { buf[i++] = '0' + (val % 10); val /= 10; }
-    while (i > 0) esp_putc(buf[--i]);
-}
-#endif
-
-int esp_rx_available(void) {
-    return (EUSCI_A2->IFG & EUSCI_A_IFG_RXIFG) != 0;
-}
-
-char esp_getc(void) {
-    while (!esp_rx_available());
-    return EUSCI_A2->RXBUF;
 }
 
 /*===========================================================================*/
@@ -295,8 +276,16 @@ void send_msg(const char *msg) {
 
 #if !SIMULATED
 void send_pos(uint16_t pan, uint16_t tilt) {
-    esp_print("P,"); esp_int(pan);
-    esp_putc(','); esp_int(tilt);
+    char buf[12];
+    int i = 0;
+    uint16_t v = pan;
+    esp_print("P,");
+    do { buf[i++] = '0' + (v % 10); v /= 10; } while (v > 0);
+    while (i > 0) esp_putc(buf[--i]);
+    esp_putc(',');
+    i = 0; v = tilt;
+    do { buf[i++] = '0' + (v % 10); v /= 10; } while (v > 0);
+    while (i > 0) esp_putc(buf[--i]);
     esp_print("\r\n");
 }
 #endif
@@ -334,45 +323,21 @@ void reset_sim_distance(void) {
 
 #else /* SIMULATED */
 
-int read_esp_distance(uint16_t *dist_out) {
-    char c;
-    int val = 0;
-    int state = 0;
+/* Danger signal from ESP32 DANGER_PIN over a plain GPIO (P4.0).
+ * HIGH = obstacle within CRITICAL_THRESHOLD_MM, LOW = clear. */
+#define DANGER_IN_PORT GPIO_PORT_P4
+#define DANGER_IN_PIN  GPIO_PIN0
 
-    while (1) {
-        if (!esp_rx_available()) return 0;
-        c = esp_getc();
+void danger_pin_init(void) {
+    GPIO_setAsInputPin(DANGER_IN_PORT, DANGER_IN_PIN);
+}
 
-        if (state == 0) {
-            if (c == 'D') state = 1;
-        } else if (state == 1) {
-            if (c == ',') { state = 2; val = 0; }
-            else state = 0;
-        } else if (state == 2) {
-            if (c >= '0' && c <= '9') {
-                val = val * 10 + (c - '0');
-            } else if (c == '\n') {
-                *dist_out = (uint16_t)val;
-                return 1;
-            } else if (c != '\r') {
-                state = 0;
-            }
-        }
-    }
+int danger_detected(void) {
+    return GPIO_getInputPinValue(DANGER_IN_PORT, DANGER_IN_PIN) == GPIO_INPUT_PIN_HIGH;
 }
 
 uint16_t poll_distance(void) {
-    uint16_t dist = 0;
-    uint32_t timeout = 0;
-
-    esp_print("Q\r\n");
-
-    while (!read_esp_distance(&dist) && timeout < 3000) {
-        timeout++;
-        delay_ms(1);
-    }
-
-    return (dist > 0) ? dist : 2000;
+    return danger_detected() ? 100 : 2000;
 }
 
 #endif /* SIMULATED */
@@ -545,6 +510,9 @@ int main(void) {
 
     motor_pins_init();
     timer_init();
+#if !SIMULATED
+    danger_pin_init();
+#endif
     delay_ms(500);
 
     send_msg("Motors + servos ready");

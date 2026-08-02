@@ -1,12 +1,8 @@
 /* esp32-sentry.ino
  * ESP32 companion for sentry-target-lock test.
  *
- * Receives via UART from MSP432:
- *   P,pan,tilt\r\n  - servo position update (triggers ToF read + response)
- *   Q\r\n           - query distance only
- *
- * Sends via UART to MSP432:
- *   D,dist_mm\r\n   - ToF distance reading
+ * Streams ToF distance continuously via UART to MSP432:
+ *   D,dist_mm\r\n
  *
  * Also broadcasts to WebSocket dashboard for visualization.
  *
@@ -140,66 +136,36 @@ void setup() {
 }
 
 /*===========================================================================*/
-/* LOOP - read UART, read ToF, respond and broadcast                        */
+/* LOOP - stream ToF distance to MSP432 continuously                       */
 /*===========================================================================*/
 
 void send_to_msp(uint16_t dist) {
     Serial1.print("D,");
     Serial1.print(dist);
     Serial1.print("\n");
+    Serial.print("TX1: D,");
+    Serial.println(dist);
 }
 
 void loop() {
-    static String buf;
-    int pan, tilt;
     uint16_t dist;
+    uint32_t to = 0;
 
     server.handleClient();
     ws.loop();
 
-    while (Serial1.available()) {
-        char c = Serial1.read();
-        if (c == '\n') {
-            buf.trim();
-            if (buf.length() > 0) {
-                Serial.println("RX: " + buf);
-
-                if (buf.startsWith("P,") || buf.startsWith("Q")) {
-                    if (buf.startsWith("P,")) {
-                        int c1 = buf.indexOf(',', 2);
-                        if (c1 > 0) {
-                            pan = buf.substring(2, c1).toInt();
-                            int tilt_val = buf.substring(c1 + 1).toInt();
-                            ws.broadcastTXT("P," + String(pan) + "," + String(tilt_val));
-                        }
-                    }
-
-                    {
-                        uint32_t to = 0;
-                        while (!vl53.dataReady() && to < 100) {
-                            delay(1);
-                            to++;
-                        }
-                        if (vl53.dataReady()) {
-                            dist = vl53.distance();
-                            vl53.clearInterrupt();
-                            vl53.startRanging();
-                        } else {
-                            dist = 0;
-                        }
-                    }
-
-                    if (dist > 0 && dist < 4000) {
-                        send_to_msp(dist);
-                        ws.broadcastTXT("D," + String(dist));
-                    }
-                } else if (buf.startsWith("M,")) {
-                    ws.broadcastTXT(buf);
-                }
-            }
-            buf = "";
-        } else if (c != '\r') {
-            buf += c;
+    /* Stream distance continuously - no request/response needed */
+    while (!vl53.dataReady() && to < 100) {
+        delay(1);
+        to++;
+    }
+    if (vl53.dataReady()) {
+        dist = vl53.distance();
+        vl53.clearInterrupt();
+        vl53.startRanging();
+        if (dist > 0 && dist < 4000) {
+            send_to_msp(dist);
+            ws.broadcastTXT("D," + String(dist));
         }
     }
 }

@@ -24,6 +24,9 @@
 #define SDA_PIN     21
 #define SCL_PIN     22
 #define RX_PIN      16
+#define DANGER_PIN  26
+
+#define CRITICAL_MM 500
 
 const char* ssid = "ROVER3D";
 const char* password = "12345678";
@@ -36,6 +39,9 @@ Adafruit_VL53L1X vl53 = Adafruit_VL53L1X();
 float rover_x = 0;       /* mm */
 float rover_y = 0;       /* mm */
 float rover_heading = 0; /* degrees */
+
+/* Latest streamed distance for danger pin + mapping */
+static uint16_t last_dist = 0;
 
 #define DEG_TO_RAD 0.0174533f
 #define PAN_CENTER 45
@@ -115,6 +121,7 @@ button:hover{background:#0aa}
 <button onclick="toggleAuto()">Auto-rotate</button>
 <button onclick="resetView()">Reset View</button>
 <button onclick="togglePath()">Toggle Path</button>
+<button onclick="downloadPly()">Download PLY</button>
 </div>
 
 <div class="main">
@@ -151,6 +158,29 @@ function clearPts(){pts=[];path=[];log('Cleared');}
 function toggleAuto(){autoRot=!autoRot;}
 function togglePath(){showPath=!showPath;}
 function resetView(){rotX=-0.4;rotY=0.6;zoom=0.3;}
+
+function downloadPly(){
+  if(pts.length===0){log('No points to download');return;}
+  let head='ply\nformat ascii 1.0\n'
+    +'element vertex '+pts.length+'\n'
+    +'property float x\nproperty float y\nproperty float z\n'
+    +'property uchar red\nproperty uchar green\nproperty uchar blue\n'
+    +'end_header\n';
+  let body='';
+  for(let p of pts){
+    let d=Math.sqrt(p.x*p.x+p.y*p.y+p.z*p.z);
+    let t=Math.min(1,d/2000);
+    let r=Math.round(50+t*200),g=Math.round(200-t*150),b=Math.round(255-t*200);
+    body+=p.x+' '+p.y+' '+p.z+' '+r+' '+g+' '+b+'\n';
+  }
+  const blob=new Blob([head+body],{type:'text/plain'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='rover3d-cloud.ply';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  log('Exported '+pts.length+' points to rover3d-cloud.ply');
+}
 
 function distColor(d){
   let t=Math.min(1,d/2000);
@@ -316,6 +346,9 @@ void setup() {
     Serial.begin(115200);
     Serial.println("\nRover3D ESP32");
 
+    pinMode(DANGER_PIN, OUTPUT);
+    digitalWrite(DANGER_PIN, LOW);
+
     /* ToF init */
     pinMode(XSHUT_PIN, OUTPUT);
     digitalWrite(XSHUT_PIN, LOW);
@@ -360,6 +393,20 @@ void loop() {
     server.handleClient();
     ws.loop();
 
+    /* Continuously read ToF: drive DANGER_PIN for hazard avoidance
+     * and keep the latest distance for the mapping scan */
+    dist = 0;
+    if (vl53.dataReady()) {
+        dist = vl53.distance();
+        vl53.clearInterrupt();
+        vl53.startRanging();
+        if (dist > 20 && dist < 4000) {
+            last_dist = dist;
+            digitalWrite(DANGER_PIN, (dist < CRITICAL_MM) ? HIGH : LOW);
+            ws.broadcastTXT("D," + String(dist) + ",1");
+        }
+    }
+
     while (Serial1.available()) {
         char c = Serial1.read();
         if (c == '\n') {
@@ -368,27 +415,18 @@ void loop() {
                 Serial.println("RX: " + buf);
 
                 if (buf.startsWith("P,")) {
-                    /* Servo position - read ToF and compute world point */
+                    /* Servo position - use latest ToF reading to compute world point */
                     int c1 = buf.indexOf(',', 2);
                     if (c1 > 0) {
                         pan = buf.substring(2, c1).toInt();
                         tilt = buf.substring(c1 + 1).toInt();
 
-                        /* Read ToF */
-                        dist = 0;
-                        if (vl53.dataReady()) {
-                            dist = vl53.distance();
-                            vl53.clearInterrupt();
-                        }
-
-                        /* Filter valid readings */
-                        if (dist > 20 && dist < 4000) {
-                            /* Compute world coordinates */
-                            compute_world_point(pan, tilt, dist, &wx, &wy, &wz);
+                        /* Compute world coordinates from latest reading */
+                        if (last_dist > 20 && last_dist < 4000) {
+                            compute_world_point(pan, tilt, last_dist, &wx, &wy, &wz);
 
                             /* Send to dashboard */
                             ws.broadcastTXT("W," + String(wx) + "," + String(wy) + "," + String(wz));
-                            ws.broadcastTXT("D," + String(dist) + ",1");
                         }
                     }
                 }

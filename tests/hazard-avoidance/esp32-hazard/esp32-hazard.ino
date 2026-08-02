@@ -28,9 +28,9 @@
 #define SDA_PIN     21
 #define SCL_PIN     22
 #define UART_RX_PIN 16
-#define UART_TX_PIN 4
+#define DANGER_PIN  26
 
-#define CRITICAL_MM 150
+#define CRITICAL_MM 500
 
 const char* ssid = "ROVER3D";
 const char* password = "12345678";
@@ -126,6 +126,9 @@ void setup() {
     Serial.begin(115200);
     Serial.println("\nESP32 Hazard Test");
 
+    pinMode(DANGER_PIN, OUTPUT);
+    digitalWrite(DANGER_PIN, LOW);
+
     pinMode(XSHUT_PIN, OUTPUT);
     digitalWrite(XSHUT_PIN, LOW);
     delay(50);
@@ -150,7 +153,7 @@ void setup() {
     ws.begin();
     ws.onEvent(wsEvent);
 
-    Serial1.begin(115200, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+    Serial1.begin(115200, SERIAL_8N1, UART_RX_PIN, -1);
     Serial.println("Ready");
 }
 
@@ -158,63 +161,56 @@ void setup() {
 /* LOOP                                                                      */
 /*===========================================================================*/
 
-void send_to_msp(uint16_t dist) {
-    Serial1.print("D,");
-    Serial1.print(dist);
-    Serial1.print("\n");
-}
+String lastMode = "INIT";
+uint32_t lastModeTime = 0;
 
 void loop() {
     static String buf;
-    int pan, tilt;
     uint16_t dist;
+    uint32_t to = 0;
 
     server.handleClient();
     ws.loop();
 
+    /* Forward P, (pan) and M, (mode) messages from MSP432 to dashboard */
     while (Serial1.available()) {
         char c = Serial1.read();
         if (c == '\n') {
             buf.trim();
             if (buf.length() > 0) {
-                Serial.println("RX: " + buf);
-
-                if (buf.startsWith("P,") || buf.startsWith("Q")) {
-                    if (buf.startsWith("P,")) {
-                        int c1 = buf.indexOf(',', 2);
-                        if (c1 > 0) {
-                            pan = buf.substring(2, c1).toInt();
-                            tilt = buf.substring(c1 + 1).toInt();
-                            ws.broadcastTXT("P," + String(pan) + "," + String(tilt));
-                        }
-                    }
-
-                    {
-                        uint32_t to = 0;
-                        while (!vl53.dataReady() && to < 100) {
-                            delay(1);
-                            to++;
-                        }
-                        if (vl53.dataReady()) {
-                            dist = vl53.distance();
-                            vl53.clearInterrupt();
-                            vl53.startRanging();
-                        } else {
-                            dist = 0;
-                        }
-                    }
-
-                    if (dist > 0 && dist < 4000) {
-                        send_to_msp(dist);
-                        ws.broadcastTXT("D," + String(dist));
-                    }
-                } else if (buf.startsWith("M,")) {
+                if (buf.startsWith("M,")) {
+                    lastMode = buf;
+                }
+                if (buf.startsWith("P,") || buf.startsWith("M,")) {
                     ws.broadcastTXT(buf);
                 }
             }
             buf = "";
         } else if (c != '\r') {
             buf += c;
+        }
+    }
+
+    /* Re-broadcast current mode every 500ms so dashboard stays in sync
+     * even if a browser connected after the mode was first sent */
+    if (millis() - lastModeTime > 500) {
+        lastModeTime = millis();
+        ws.broadcastTXT(lastMode);
+    }
+
+    /* Stream distance continuously, drive DANGER_PIN HIGH when obstacle
+     * is within CRITICAL_MM */
+    while (!vl53.dataReady() && to < 100) {
+        delay(1);
+        to++;
+    }
+    if (vl53.dataReady()) {
+        dist = vl53.distance();
+        vl53.clearInterrupt();
+        vl53.startRanging();
+        if (dist > 0 && dist < 4000) {
+            digitalWrite(DANGER_PIN, (dist < CRITICAL_MM) ? HIGH : LOW);
+            ws.broadcastTXT("D," + String(dist));
         }
     }
 }

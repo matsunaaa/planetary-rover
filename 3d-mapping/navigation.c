@@ -52,6 +52,12 @@
 #define SERVO_MAX       3000
 #define MOTOR_PERIOD    30000
 
+/* Danger signal from ESP32 over a plain GPIO (P4.0).
+ * HIGH = obstacle within range, LOW = clear. No UART needed. */
+#define DANGER_IN_PORT  GPIO_PORT_P4
+#define DANGER_IN_PIN   GPIO_PIN0
+#define HAZARD_CHECK_MS 20
+
 static float rover_x = 0.0f;
 static float rover_y = 0.0f;
 static float rover_heading = 0.0f;
@@ -233,6 +239,18 @@ void motor_turn_right(uint16_t pwm) {
 }
 
 /*===========================================================================*/
+/* HAZARD SIGNAL (ESP32 DANGER_PIN -> P4.0)                                 */
+/*===========================================================================*/
+
+void danger_pin_init(void) {
+    GPIO_setAsInputPin(DANGER_IN_PORT, DANGER_IN_PIN);
+}
+
+int danger_detected(void) {
+    return GPIO_getInputPinValue(DANGER_IN_PORT, DANGER_IN_PIN) == GPIO_INPUT_PIN_HIGH;
+}
+
+/*===========================================================================*/
 /* SERVO CONTROL                                                             */
 /*===========================================================================*/
 
@@ -321,16 +339,27 @@ void update_position(float dist_cm, float delta_heading_deg) {
     rover_y += dist_cm * cosf(heading_rad);
 }
 
-void drive_forward_cm(float cm) {
+int drive_forward_cm(float cm) {
     uint32_t time_ms;
-    if (cm <= 0) return;
+    uint32_t elapsed;
+    if (cm <= 0) return 1;
     time_ms = (uint32_t)(cm / SPEED_CM_PER_MS);
     send_msg("Drive fwd");
     motor_forward(BASE_PWM);
-    delay_ms(time_ms);
+    elapsed = 0;
+    while (elapsed < time_ms) {
+        delay_ms(HAZARD_CHECK_MS);
+        elapsed += HAZARD_CHECK_MS;
+        if (danger_detected()) {
+            motor_stop();
+            send_msg("Obstacle! Stop");
+            return 0;
+        }
+    }
     motor_stop();
     update_position(cm, 0);
     send_rover_pos();
+    return 1;
 }
 
 void drive_backward_cm(float cm) {
@@ -468,10 +497,15 @@ void nav_step(void) {
             break;
 
         case STATE_DRIVE:
-            drive_forward_cm(DRIVE_DIST_CM);
-            delay_ms(200);
-            do_quick_scan();
-            state = STATE_SCAN;
+            if (!drive_forward_cm(DRIVE_DIST_CM)) {
+                motor_stop();
+                turns_since_180++;
+                state = STATE_TURN;
+            } else {
+                delay_ms(200);
+                do_quick_scan();
+                state = STATE_SCAN;
+            }
             break;
 
         case STATE_TURN:
@@ -521,6 +555,7 @@ int main(void) {
 
     motor_init();
     timer_init();
+    danger_pin_init();
     delay_ms(500);
 
     send_msg("Motors ready");
